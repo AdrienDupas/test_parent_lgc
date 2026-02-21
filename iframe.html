@@ -1,0 +1,289 @@
+<!doctype html>
+<!-- saved from url=(0045)https://carte-lgc-technat-trump-v.vercel.app/ -->
+<html lang="en">
+  <head>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+      }
+      .iframe-wrapper {
+        position: relative;
+        width: 100%;
+        height: 100vh;
+      }
+      .iframe-wrapper iframe {
+        display: block;
+        width: 100%;
+        height: 100%;
+        border: none;
+      }
+      /* Overlay transparent qui capture les événements souris/wheel
+         quand l'iframe n'a pas capturé le scroll.
+         Cela empêche l'app React de recevoir les wheel events
+         quand l'iframe est partiellement visible. */
+      #iframe-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 10;
+        /* visible par défaut = bloque les events vers l'iframe */
+      }
+      #iframe-overlay.inactive {
+        pointer-events: none;
+        /* quand capturé, désactive l'overlay pour que l'iframe reçoive les events */
+      }
+    </style>
+  </head>
+
+  <body>
+    <div
+      style="
+        height: 800px;
+        background-color: blue;
+        color: white;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      "
+    >
+      Title 
+    </div>
+
+    <div class="iframe-wrapper" id="iframe-wrapper">
+      <div id="iframe-overlay"></div>
+      <iframe
+        id="react-iframe"
+        src="https://test-carte-lgc-916l.vercel.app/"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope"
+      ></iframe>
+    </div>
+
+    <div style="height: 1500px; padding: 50px; background-color: beige">
+      Lorem ipsum dolor sit amet, consectetur adipiscing elit. Duis risus
+      lectus, rhoncus eget lobortis at, tincidunt sed diam. Quisque lobortis sem
+      id dolor pellentesque, eleifend tincidunt ipsum scelerisque. Maecenas
+      suscipit rhoncus convallis. Suspendisse potenti. Pellentesque non
+      vulputate erat. Phasellus eu justo ut metus faucibus tempus. Etiam
+      malesuada lacus eros. Aliquam mollis at ipsum nec condimentum. Sed at
+      vehicula sapien. Curabitur a faucibus tellus. Lorem ipsum dolor sit amet,
+      consectetur adipiscing elit. Nunc lobortis porttitor felis, eu auctor
+      elit. Integer eu ipsum id elit iaculis tempor quis sit amet magna.
+      Pellentesque et viverra orci. Vestibulum sed mauris vehicula, pellentesque
+      justo sit amet, imperdiet sapien.
+    </div>
+
+    <script>
+      const iframeWrapper = document.getElementById('iframe-wrapper');
+      const iframe = document.getElementById('react-iframe');
+      const overlay = document.getElementById('iframe-overlay');
+
+      let reactAtBottom = false;
+      let reactAtTop = true;
+      let captured = false;
+
+      // Batching des deltas via rAF pour éviter le lag
+      let pendingDelta = 0;
+      let rafId = null;
+
+      function flushDelta() {
+        rafId = null;
+        if (pendingDelta === 0) return;
+        const d = pendingDelta;
+        pendingDelta = 0;
+        iframe.contentWindow.postMessage(
+          { type: 'parentWheel', deltaY: d },
+          '*'
+        );
+      }
+
+      function sendDelta(deltaY) {
+        pendingDelta += deltaY;
+        if (rafId === null) {
+          rafId = requestAnimationFrame(flushDelta);
+        }
+      }
+
+      // Position de scroll sauvegardée pour le fix iOS position:fixed
+      let savedScrollY = 0;
+
+      // ╔══════════════════════════════════════════════════════════════════╗
+      // ║  📱 SMARTPHONE SCROLL LOCK — setCapture()                      ║
+      // ║  Utilise position:fixed + touch-action:none sur le body        ║
+      // ║  pour bloquer le scroll natif iOS/Android quand l'iframe       ║
+      // ║  est en mode capture (scroll délégué à l'app React).           ║
+      // ╚══════════════════════════════════════════════════════════════════╝
+      function setCapture(val) {
+        if (captured === val) return;
+        captured = val;
+        if (captured) {
+          // Snap + verrouiller le scroll de la page complètement
+          savedScrollY = window.scrollY;
+          window.scrollTo({ top: getSnapY(), behavior: 'instant' });
+          // iOS nécessite position:fixed + touch-action:none pour bloquer le scroll natif
+          document.documentElement.style.overflow = 'hidden';
+          document.body.style.overflow = 'hidden';
+          document.body.style.position = 'fixed';
+          document.body.style.top = `-${getSnapY()}px`;
+          document.body.style.left = '0';
+          document.body.style.right = '0';
+          document.body.style.touchAction = 'none';
+          overlay.classList.add('inactive');
+        } else {
+          // Déverrouiller le scroll
+          document.documentElement.style.overflow = '';
+          document.body.style.overflow = '';
+          document.body.style.position = '';
+          document.body.style.top = '';
+          document.body.style.left = '';
+          document.body.style.right = '';
+          document.body.style.touchAction = '';
+          overlay.classList.remove('inactive');
+          // Restaurer la position de scroll après suppression du position:fixed
+          window.scrollTo(0, savedScrollY);
+        }
+      }
+
+      window.addEventListener('message', (event) => {
+        const { type } = event.data || {};
+        if (type === 'reactScrollBottom') { reactAtBottom = true; reactAtTop = false; }
+        if (type === 'reactScrollTop')    { reactAtTop = true; reactAtBottom = false; }
+        if (type === 'reactScrollMiddle') { reactAtTop = false; reactAtBottom = false; }
+
+        // L'iframe React signale qu'elle est à une limite et ne peut plus scroller
+        // dans la direction demandée → relâcher le capture et scroller la page
+        if (type === 'iframeBoundaryWheel') {
+          setCapture(false);
+          window.scrollBy(0, event.data.deltaY);
+        }
+      });
+
+      function getSnapY() {
+        return iframeWrapper.offsetTop;
+      }
+
+      // Intercepter le wheel sur la page (inclut les events sur l'overlay)
+      window.addEventListener('wheel', (e) => {
+        const rect = iframeWrapper.getBoundingClientRect();
+        const vh = window.innerHeight;
+        const down = e.deltaY > 0;
+        const up = e.deltaY < 0;
+
+        const fills = rect.top <= 2 && rect.bottom >= vh - 2;
+
+        // Sécurité : si captured mais iframe clairement hors vue, relâcher
+        if (captured && !fills && (rect.bottom < -50 || rect.top > vh + 50)) {
+          setCapture(false);
+        }
+
+        // ── CAPTURED ou remplit le viewport ──
+        if (captured || fills) {
+          if (down && reactAtBottom) { setCapture(false); return; }
+          if (up  && reactAtTop)    { setCapture(false); return; }
+
+          setCapture(true);
+          e.preventDefault();
+
+          sendDelta(e.deltaY);
+          return;
+        }
+
+        // ── Zone d'accroche réduite (30-60px max) ──
+        const catchZone = Math.min(Math.max(Math.abs(e.deltaY), 30), 60);
+
+        // Scroll ↓ : iframe approche par le haut
+        if (down && rect.top > 0 && rect.top <= catchZone) {
+          e.preventDefault();
+          window.scrollTo({ top: getSnapY(), behavior: 'instant' });
+          setCapture(true);
+          return;
+        }
+
+        // Scroll ↑ : iframe approche par le bas
+        if (up && rect.bottom > 0 && rect.bottom < vh && (vh - rect.bottom) <= catchZone) {
+          e.preventDefault();
+          window.scrollTo({ top: getSnapY(), behavior: 'instant' });
+          setCapture(true);
+          return;
+        }
+      }, { passive: false });
+
+      // ╔══════════════════════════════════════════════════════════════════╗
+      // ║  📱 SMARTPHONE SCROLL LOCK — SUPPORT TACTILE (iOS / Android)   ║
+      // ║  Reproduit la logique du wheel pour les événements touch.       ║
+      // ║  touchstart → enregistre la position Y initiale                ║
+      // ║  touchmove  → calcule deltaY, snap, capture, envoie à iframe  ║
+      // ║  touchend   → reset                                           ║
+      // ╚══════════════════════════════════════════════════════════════════╝
+      let touchStartY = null;
+      let touchLastY = null;
+
+      window.addEventListener('touchstart', (e) => {
+        if (e.touches.length !== 1) return;
+        touchStartY = e.touches[0].clientY;
+        touchLastY = touchStartY;
+      }, { passive: true });
+
+      window.addEventListener('touchmove', (e) => {
+        if (e.touches.length !== 1 || touchLastY === null) return;
+
+        const currentY = e.touches[0].clientY;
+        const deltaY = touchLastY - currentY; // positif = scroll vers le bas
+        touchLastY = currentY;
+
+        // Ignorer les micro-mouvements
+        if (Math.abs(deltaY) < 1) return;
+
+        const rect = iframeWrapper.getBoundingClientRect();
+        const vh = window.innerHeight;
+        const down = deltaY > 0;
+        const up = deltaY < 0;
+
+        const fills = rect.top <= 2 && rect.bottom >= vh - 2;
+
+        // Sécurité : si captured mais iframe clairement hors vue, relâcher
+        if (captured && !fills && (rect.bottom < -50 || rect.top > vh + 50)) {
+          setCapture(false);
+        }
+
+        // ── CAPTURED ou remplit le viewport ──
+        if (captured || fills) {
+          if (down && reactAtBottom) { setCapture(false); return; }
+          if (up  && reactAtTop)    { setCapture(false); return; }
+
+          setCapture(true);
+          e.preventDefault();
+
+          sendDelta(deltaY);
+          return;
+        }
+
+        // ── Zone d'accroche (plus large pour le tactile) ──
+        const catchZone = 80;
+
+        // Scroll ↓ : iframe approche par le haut
+        if (down && rect.top > 0 && rect.top <= catchZone) {
+          e.preventDefault();
+          window.scrollTo({ top: getSnapY(), behavior: 'instant' });
+          setCapture(true);
+          return;
+        }
+
+        // Scroll ↑ : iframe approche par le bas
+        if (up && rect.bottom > 0 && rect.bottom < vh && (vh - rect.bottom) <= catchZone) {
+          e.preventDefault();
+          window.scrollTo({ top: getSnapY(), behavior: 'instant' });
+          setCapture(true);
+          return;
+        }
+      }, { passive: false });
+
+      window.addEventListener('touchend', () => {
+        touchStartY = null;
+        touchLastY = null;
+      }, { passive: true });
+    </script>
+  </body>
+</html>
