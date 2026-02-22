@@ -2,7 +2,11 @@
 <!-- saved from url=(0045)https://carte-lgc-technat-trump-v.vercel.app/ -->
 <html lang="en">
   <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
+      html {
+        scroll-snap-type: y proximity;
+      }
       html, body {
         margin: 0;
         padding: 0;
@@ -11,6 +15,8 @@
         position: relative;
         width: 100%;
         height: 100vh;
+        scroll-snap-align: start;
+        scroll-snap-stop: always;
       }
       .iframe-wrapper iframe {
         display: block;
@@ -84,6 +90,13 @@
       let reactAtTop = true;
       let captured = false;
 
+      // Détection du type d'input : touch vs souris
+      // Sur mobile, on garde l'overlay ACTIF quand capturé pour ne pas perdre
+      // les touch events dans l'iframe cross-origin.
+      let lastInputType = 'mouse';
+      window.addEventListener('touchstart', () => { lastInputType = 'touch'; }, { passive: true, capture: true });
+      window.addEventListener('mousedown', () => { lastInputType = 'mouse'; }, { passive: true });
+
       // Batching des deltas via rAF pour éviter le lag
       let pendingDelta = 0;
       let rafId = null;
@@ -106,42 +119,87 @@
         }
       }
 
-      // Position de scroll sauvegardée pour le fix iOS position:fixed
-      let savedScrollY = 0;
-
       // ╔══════════════════════════════════════════════════════════════════╗
       // ║  📱 SMARTPHONE SCROLL LOCK — setCapture()                      ║
-      // ║  Utilise position:fixed + touch-action:none sur le body        ║
-      // ║  pour bloquer le scroll natif iOS/Android quand l'iframe       ║
-      // ║  est en mode capture (scroll délégué à l'app React).           ║
+      // ║  5 mécanismes combinés pour garantir le blocage sur iOS/Android ║
+      // ║  1. overflow:hidden sur html+body                              ║
+      // ║  2. position:fixed sur body (iOS Safari)                       ║
+      // ║  3. touch-action:none sur html+body                            ║
+      // ║  4. overscroll-behavior:none (pull-to-refresh)                 ║
+      // ║  5. Bloqueur touchmove sur document en phase capture           ║
       // ╚══════════════════════════════════════════════════════════════════╝
+      let savedScrollY = 0;
+      let justReleased = false;
+      let documentTouchBlocker = null;
+
       function setCapture(val) {
         if (captured === val) return;
         captured = val;
+
         if (captured) {
-          // Snap + verrouiller le scroll de la page complètement
-          savedScrollY = window.scrollY;
-          window.scrollTo({ top: getSnapY(), behavior: 'instant' });
-          // iOS nécessite position:fixed + touch-action:none pour bloquer le scroll natif
+          justReleased = false;
+          savedScrollY = getSnapY();
+          window.scrollTo({ top: savedScrollY, behavior: 'instant' });
+
+          // Lock 1 : overflow hidden
           document.documentElement.style.overflow = 'hidden';
           document.body.style.overflow = 'hidden';
+
+          // Lock 2 : position fixed (indispensable iOS Safari)
           document.body.style.position = 'fixed';
-          document.body.style.top = `-${getSnapY()}px`;
+          document.body.style.top = `-${savedScrollY}px`;
           document.body.style.left = '0';
           document.body.style.right = '0';
+          document.body.style.width = '100%';
+
+          // Lock 3 : touch-action none
+          document.documentElement.style.touchAction = 'none';
           document.body.style.touchAction = 'none';
-          overlay.classList.add('inactive');
+
+          // Lock 4 : overscroll-behavior none
+          document.documentElement.style.overscrollBehavior = 'none';
+          document.body.style.overscrollBehavior = 'none';
+
+          // Lock 5 : bloqueur touchmove sur document en phase capture
+          // C'est le mécanisme le PLUS fiable sur iOS Safari
+          documentTouchBlocker = function(e) {
+            e.preventDefault();
+          };
+          document.addEventListener('touchmove', documentTouchBlocker, { passive: false, capture: true });
+
+          // Désactiver scroll-snap pendant le capture
+          document.documentElement.style.scrollSnapType = 'none';
+
+          // Desktop (souris) : overlay inactif pour que l'iframe reçoive hover/click
+          // Mobile (touch) : overlay ACTIF pour capturer les touch et les forwarder
+          if (lastInputType !== 'touch') {
+            overlay.classList.add('inactive');
+          }
         } else {
-          // Déverrouiller le scroll
+          justReleased = true;
+          setTimeout(() => { justReleased = false; }, 500);
+
+          // Retirer le bloqueur touchmove
+          if (documentTouchBlocker) {
+            document.removeEventListener('touchmove', documentTouchBlocker, { capture: true });
+            documentTouchBlocker = null;
+          }
+
+          // Restaurer tous les styles
           document.documentElement.style.overflow = '';
           document.body.style.overflow = '';
           document.body.style.position = '';
           document.body.style.top = '';
           document.body.style.left = '';
           document.body.style.right = '';
+          document.body.style.width = '';
+          document.documentElement.style.touchAction = '';
           document.body.style.touchAction = '';
+          document.documentElement.style.overscrollBehavior = '';
+          document.body.style.overscrollBehavior = '';
+          document.documentElement.style.scrollSnapType = '';
+
           overlay.classList.remove('inactive');
-          // Restaurer la position de scroll après suppression du position:fixed
           window.scrollTo(0, savedScrollY);
         }
       }
@@ -152,8 +210,6 @@
         if (type === 'reactScrollTop')    { reactAtTop = true; reactAtBottom = false; }
         if (type === 'reactScrollMiddle') { reactAtTop = false; reactAtBottom = false; }
 
-        // L'iframe React signale qu'elle est à une limite et ne peut plus scroller
-        // dans la direction demandée → relâcher le capture et scroller la page
         if (type === 'iframeBoundaryWheel') {
           setCapture(false);
           window.scrollBy(0, event.data.deltaY);
@@ -164,7 +220,7 @@
         return iframeWrapper.offsetTop;
       }
 
-      // Intercepter le wheel sur la page (inclut les events sur l'overlay)
+      // ── WHEEL HANDLER (desktop) ──
       window.addEventListener('wheel', (e) => {
         const rect = iframeWrapper.getBoundingClientRect();
         const vh = window.innerHeight;
@@ -173,27 +229,22 @@
 
         const fills = rect.top <= 2 && rect.bottom >= vh - 2;
 
-        // Sécurité : si captured mais iframe clairement hors vue, relâcher
         if (captured && !fills && (rect.bottom < -50 || rect.top > vh + 50)) {
           setCapture(false);
         }
 
-        // ── CAPTURED ou remplit le viewport ──
         if (captured || fills) {
           if (down && reactAtBottom) { setCapture(false); return; }
           if (up  && reactAtTop)    { setCapture(false); return; }
 
           setCapture(true);
           e.preventDefault();
-
           sendDelta(e.deltaY);
           return;
         }
 
-        // ── Zone d'accroche réduite (30-60px max) ──
         const catchZone = Math.min(Math.max(Math.abs(e.deltaY), 30), 60);
 
-        // Scroll ↓ : iframe approche par le haut
         if (down && rect.top > 0 && rect.top <= catchZone) {
           e.preventDefault();
           window.scrollTo({ top: getSnapY(), behavior: 'instant' });
@@ -201,7 +252,6 @@
           return;
         }
 
-        // Scroll ↑ : iframe approche par le bas
         if (up && rect.bottom > 0 && rect.bottom < vh && (vh - rect.bottom) <= catchZone) {
           e.preventDefault();
           window.scrollTo({ top: getSnapY(), behavior: 'instant' });
@@ -213,9 +263,9 @@
       // ╔══════════════════════════════════════════════════════════════════╗
       // ║  📱 SMARTPHONE SCROLL LOCK — SUPPORT TACTILE (iOS / Android)   ║
       // ║  Reproduit la logique du wheel pour les événements touch.       ║
-      // ║  touchstart → enregistre la position Y initiale                ║
-      // ║  touchmove  → calcule deltaY, snap, capture, envoie à iframe  ║
-      // ║  touchend   → reset                                           ║
+      // ║  L'overlay reste ACTIF sur mobile pour capturer les touch      ║
+      // ║  et les forwarder via postMessage (évite que les events         ║
+      // ║  partent dans l'iframe cross-origin et soient perdus).         ║
       // ╚══════════════════════════════════════════════════════════════════╝
       let touchStartY = null;
       let touchLastY = null;
@@ -233,7 +283,6 @@
         const deltaY = touchLastY - currentY; // positif = scroll vers le bas
         touchLastY = currentY;
 
-        // Ignorer les micro-mouvements
         if (Math.abs(deltaY) < 1) return;
 
         const rect = iframeWrapper.getBoundingClientRect();
@@ -243,27 +292,22 @@
 
         const fills = rect.top <= 2 && rect.bottom >= vh - 2;
 
-        // Sécurité : si captured mais iframe clairement hors vue, relâcher
         if (captured && !fills && (rect.bottom < -50 || rect.top > vh + 50)) {
           setCapture(false);
         }
 
-        // ── CAPTURED ou remplit le viewport ──
         if (captured || fills) {
           if (down && reactAtBottom) { setCapture(false); return; }
           if (up  && reactAtTop)    { setCapture(false); return; }
 
           setCapture(true);
           e.preventDefault();
-
           sendDelta(deltaY);
           return;
         }
 
-        // ── Zone d'accroche (plus large pour le tactile) ──
         const catchZone = 80;
 
-        // Scroll ↓ : iframe approche par le haut
         if (down && rect.top > 0 && rect.top <= catchZone) {
           e.preventDefault();
           window.scrollTo({ top: getSnapY(), behavior: 'instant' });
@@ -271,7 +315,6 @@
           return;
         }
 
-        // Scroll ↑ : iframe approche par le bas
         if (up && rect.bottom > 0 && rect.bottom < vh && (vh - rect.bottom) <= catchZone) {
           e.preventDefault();
           window.scrollTo({ top: getSnapY(), behavior: 'instant' });
@@ -283,6 +326,21 @@
       window.addEventListener('touchend', () => {
         touchStartY = null;
         touchLastY = null;
+      }, { passive: true });
+
+      // ╔══════════════════════════════════════════════════════════════════╗
+      // ║  📱 SCROLL EVENT BACKUP (iOS momentum)                        ║
+      // ║  Quand l'utilisateur lâche son doigt et que le scroll continue ║
+      // ║  par inertie, touchmove ne fire plus. Le scroll event           ║
+      // ║  rattrape l'iframe si elle atteint la position de snap.        ║
+      // ╚══════════════════════════════════════════════════════════════════╝
+      window.addEventListener('scroll', () => {
+        if (captured || justReleased) return;
+        const scrollY = window.scrollY || window.pageYOffset;
+        const snapY = getSnapY();
+        if (Math.abs(scrollY - snapY) <= 5) {
+          setCapture(true);
+        }
       }, { passive: true });
     </script>
   </body>
